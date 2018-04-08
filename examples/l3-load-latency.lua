@@ -31,24 +31,29 @@ function configure(parser)
 	parser:option("-r --rate", "Transmit rate in Mbit/s."):default(10000):convert(tonumber)
 	parser:option("-f --flows", "Number of flows (randomized source IP)."):default(4):convert(tonumber)
 	parser:option("-s --size", "Packet size."):default(60):convert(tonumber)
+	parser:option("-t --threads", "Number of threads to use"):default(1):convert(tonumber)
 end
 
 function master(args)
-	txDev = device.config{port = args.txDev, rxQueues = 3, txQueues = 3}
-	rxDev = device.config{port = args.rxDev, rxQueues = 3, txQueues = 3}
+	txDev = device.config{port = args.txDev, rxQueues = args.threads + 2, txQueues = args.threads + 2}
+	rxDev = device.config{port = args.rxDev, rxQueues = args.threads + 2, txQueues = args.threads + 2}
 	device.waitForLinks()
 	-- max 1kpps timestamping traffic timestamping
 	-- rate will be somewhat off for high-latency links at low rates
+	local rate
 	if args.rate > 0 then
-		txDev:getTxQueue(0):setRate(args.rate - (args.size + 4) * 8 / 1000)
+		rate = (args.rate - (args.size + 4) * 8 / 1000) / args.threads
 	end
-	mg.startTask("loadSlave", txDev:getTxQueue(0), rxDev, args.size, args.flows)
-	mg.startTask("timerSlave", txDev:getTxQueue(1), rxDev:getRxQueue(1), args.size, args.flows)
+	for i = 0, args.threads - 1 do
+		if rate then txDev:getTxQueue(i):setRate(rate) end
+		mg.startTask("loadSlave", txDev:getTxQueue(i), rxDev, args.size, args.flows)
+	end
+	mg.startTask("timerSlave", txDev:getTxQueue(args.threads), rxDev:getRxQueue(args.threads), args.size, args.flows)
 	arp.startArpTask{
 		-- run ARP on both ports
-		{ rxQueue = rxDev:getRxQueue(2), txQueue = rxDev:getTxQueue(2), ips = RX_IP },
+		{ rxQueue = rxDev:getRxQueue(args.threads + 1), txQueue = rxDev:getTxQueue(args.threads + 1), ips = RX_IP },
 		-- we need an IP address to do ARP requests on this interface
-		{ rxQueue = txDev:getRxQueue(2), txQueue = txDev:getTxQueue(2), ips = ARP_IP }
+		{ rxQueue = txDev:getRxQueue(args.threads + 1), txQueue = txDev:getTxQueue(args.threads + 1), ips = ARP_IP }
 	}
 	mg.waitForTasks()
 end
