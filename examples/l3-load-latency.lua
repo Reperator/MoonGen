@@ -35,8 +35,8 @@ function configure(parser)
 end
 
 function master(args)
-	txDev = device.config{port = args.txDev, rxQueues = args.threads + 2, txQueues = args.threads + 2}
-	rxDev = device.config{port = args.rxDev, rxQueues = args.threads + 2, txQueues = args.threads + 2}
+	txDev = device.config{port = args.txDev, rxQueues = 2, txQueues = args.threads + 2}
+	rxDev = device.config{port = args.rxDev, rxQueues = 2, txQueues = args.threads + 2}
 	device.waitForLinks()
 	-- max 1kpps timestamping traffic timestamping
 	-- rate will be somewhat off for high-latency links at low rates
@@ -44,16 +44,17 @@ function master(args)
 	if args.rate > 0 then
 		rate = (args.rate - (args.size + 4) * 8 / 1000) / args.threads
 	end
-	for i = 0, args.threads - 1 do
+	for i = 1, args.threads do
 		if rate then txDev:getTxQueue(i):setRate(rate) end
-		mg.startTask("loadSlave", txDev:getTxQueue(i), rxDev, args.size, args.flows)
+		mg.startTask("loadSlave", txDev:getTxQueue(i), args.size, args.flows, i)
 	end
-	mg.startTask("timerSlave", txDev:getTxQueue(args.threads), rxDev:getRxQueue(args.threads), args.size, args.flows)
+	stats.startStatsTask{txDevices = {txDev}, rxDevices = {rxDev}}
+	mg.startTask("timerSlave", txDev:getTxQueue(0), rxDev:getRxQueue(0), args.size, args.flows)
 	arp.startArpTask{
 		-- run ARP on both ports
-		{ rxQueue = rxDev:getRxQueue(args.threads + 1), txQueue = rxDev:getTxQueue(args.threads + 1), ips = RX_IP },
+		{ rxQueue = rxDev:getRxQueue(1), txQueue = rxDev:getTxQueue(args.threads + 1), ips = RX_IP },
 		-- we need an IP address to do ARP requests on this interface
-		{ rxQueue = txDev:getRxQueue(args.threads + 1), txQueue = txDev:getTxQueue(args.threads + 1), ips = ARP_IP }
+		{ rxQueue = txDev:getRxQueue(1), txQueue = txDev:getTxQueue(args.threads + 1), ips = ARP_IP }
 	}
 	mg.waitForTasks()
 end
@@ -70,28 +71,27 @@ local function fillUdpPacket(buf, len)
 	}
 end
 
-local function doArp()
+local function doArp(threadID)
 	if not DST_MAC then
-		log:info("Performing ARP lookup on %s", GW_IP)
+		log:info("Thread %s: Performing ARP lookup on %s", threadID, GW_IP)
 		DST_MAC = arp.blockingLookup(GW_IP, 5)
 		if not DST_MAC then
-			log:info("ARP lookup failed, using default destination mac address")
+			log:info("Thread %s: ARP lookup failed, using default destination mac address", threadID)
 			return
 		end
 	end
-	log:info("Destination mac: %s", DST_MAC)
+	log:info("Thread %s: Destination mac: %s", threadID, DST_MAC)
 end
 
-function loadSlave(queue, rxDev, size, flows)
-	doArp()
+function loadSlave(queue, size, flows, threadID)
+	doArp(tostring(threadID))
 	local mempool = memory.createMemPool(function(buf)
 		fillUdpPacket(buf, size)
 	end)
 	local bufs = mempool:bufArray()
 	local counter = 0
-	local txCtr = stats:newDevTxCounter(queue, "plain")
-	local rxCtr = stats:newDevRxCounter(rxDev, "plain")
 	local baseIP = parseIPAddress(SRC_IP_BASE)
+	log:info("Thread %d starting", threadID)
 	while mg.running() do
 		bufs:alloc(size)
 		for i, buf in ipairs(bufs) do
@@ -102,15 +102,11 @@ function loadSlave(queue, rxDev, size, flows)
 		-- UDP checksums are optional, so using just IPv4 checksums would be sufficient here
 		bufs:offloadUdpChecksums()
 		queue:send(bufs)
-		txCtr:update()
-		rxCtr:update()
 	end
-	txCtr:finalize()
-	rxCtr:finalize()
 end
 
 function timerSlave(txQueue, rxQueue, size, flows)
-	doArp()
+	doArp("timerSlave")
 	if size < 84 then
 		log:warn("Packet size %d is smaller than minimum timestamp size 84. Timestamped packets will be larger than load packets.", size)
 		size = 84
