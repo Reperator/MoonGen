@@ -32,6 +32,7 @@ function configure(parser)
 	parser:option("-f --flows", "Number of flows (randomized source IP)."):default(4):convert(tonumber)
 	parser:option("-s --size", "Packet size."):default(60):convert(tonumber)
 	parser:option("-t --threads", "Number of threads to use"):default(1):convert(tonumber)
+	parser:option("-o --output", "File to output statistics to")
 end
 
 function master(args)
@@ -48,7 +49,7 @@ function master(args)
 		if rate then txDev:getTxQueue(i):setRate(rate) end
 		mg.startTask("loadSlave", txDev:getTxQueue(i), args.size, args.flows, i)
 	end
-	stats.startStatsTask{txDevices = {txDev}, rxDevices = {rxDev}}
+	stats.startStatsTask{txDevices = {txDev}, rxDevices = {rxDev}, file = args.output}
 	mg.startTask("timerSlave", txDev:getTxQueue(0), rxDev:getRxQueue(0), args.size, args.flows)
 	arp.startArpTask{
 		-- run ARP on both ports
